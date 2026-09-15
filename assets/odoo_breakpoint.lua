@@ -46,6 +46,7 @@ M.RECORDSET_ATTRS = {
   { label = ".mapped('') (Field Mapper)", id = ".mapped('')" },
   { label = ".fields_get() (Schema Inspection)", id = ".fields_get()" },
   { label = ".read(['name']) (Dictionary Reader)", id = ".read(['name'])" },
+  { label = ".read(max_length=20) (Truncated Read)", id = "[{k: (v[:20]+(b'...' if isinstance(v, bytes) else '...') if isinstance(v, (str, bytes)) and len(v)>20 else v) for k, v in d.items()} for d in .read()]" },
   { label = "🔍 Live Introspect Target in PDB...", id = "__introspect__" },
 }
 
@@ -58,6 +59,7 @@ M.MACROS = {
   { label = "self.env.cr.commit() (DB Commit)", id = "self.env.cr.commit()" },
   { label = ".mapped('') (Field Mapper)", id = ".mapped('')" },
   { label = ".read(['name']) (Dictionary Reader)", id = ".read(['name'])" },
+  { label = ".read(max_length=20) (Truncated Read)", id = "[{k: (v[:20]+(b'...' if isinstance(v, bytes) else '...') if isinstance(v, (str, bytes)) and len(v)>20 else v) for k, v in d.items()} for d in .read()]" },
 }
 
 M.DOMAIN_OPERATORS = {
@@ -215,6 +217,28 @@ function M.show_snippet_executor()
   }
 end
 
+-- Action: Truncated .read(max_length=N) execution for Odoo recordsets
+function M.show_truncated_read()
+  return act.PromptInputLine {
+    description = "✂️ Truncated .read() Inspector:\nEnter recordset expression (e.g. self.message_ids or self) and optional max_length [default 20]:",
+    action = wezterm.action_callback(function(window, pane, line)
+      if not line or line:gsub("%s+", "") == "" then return end
+      local expr, max_len_str = line:match("^([^,]+)%s*,?%s*(%d*)$")
+      expr = expr or line
+      local max_len = tonumber(max_len_str) or 20
+
+      -- Strip trailing .read() or .read(...) if user already typed it in the expression
+      expr = expr:gsub("%.read%b()%s*$", ""):gsub("%s+$", "")
+
+      local py_cmd = string.format(
+        '[{k: (v[:%d] + (b"..." if isinstance(v, bytes) else "...")) if isinstance(v, (str, bytes)) and len(v) > %d else v for k, v in d.items()} for d in ((%s).read() if hasattr((%s), "read") else (%s))]\n',
+        max_len, max_len, expr, expr, expr
+      )
+      pane:send_text("\x15" .. py_cmd)
+    end),
+  }
+end
+
 -- Action: Clear current line and restore terminal state (stty sane) in shell & PDB
 function M.reset_terminal_sane()
   return wezterm.action_callback(function(window, pane)
@@ -245,6 +269,12 @@ function M.apply_to_config(config)
   })
 
   -- Keybindings for Breakpoint Features
+  table.insert(config.keys, {
+    key = 'r',
+    mods = 'LEADER',
+    action = M.show_truncated_read(),
+  })
+
   table.insert(config.keys, {
     key = 'a',
     mods = 'LEADER',
