@@ -87,34 +87,60 @@ function M.send_silent_introspection(pane, py_code)
   pane:send_text(cmd)
 end
 
--- Action: Open Dynamic Autocomplete Dropdown (for self. / rec. / variable)
-function M.show_dynamic_autocomplete()
-  return act.InputSelector {
-    title = "⚡ Odoo Autocomplete Dropdown (e.g. self.id, self.name)",
-    choices = M.RECORDSET_ATTRS,
-    action = wezterm.action_callback(function(window, pane, id, label)
-      if not id then return end
-      if id == "__introspect__" then
-        window:perform_action(
-          act.PromptInputLine {
-            description = "Enter Object/Variable to introspect in live PDB (e.g. self, rec, partner):",
-            action = wezterm.action_callback(function(w, p, var_name)
-              if var_name and var_name ~= "" then
-                local query = string.format(
-                  [[import json; v = eval('%s'); print("___IDE___ATTR___" + json.dumps(list(getattr(v, '_fields', {}).keys()) or [a for a in dir(v) if not a.startswith('_')]) + "___IDE___ATTR___")]],
-                  var_name
-                )
-                M.send_silent_introspection(p, query)
-              end
-            end),
-          },
-          pane
-        )
-      else
-        pane:send_text(id)
-      end
-    end),
+M.pending_autocomplete = nil
+
+-- Action: Query Python in background and emit OSC 1337 user var with dynamic fields
+function M.query_and_show_autocomplete(window, pane, prefix, var_name, had_dot)
+  M.pending_autocomplete = {
+    prefix = prefix or "",
+    var_name = var_name,
+    had_dot = had_dot,
   }
+
+  local py_cmd = string.format(
+    [[!import json, base64, sys; f = []; exec("try:\n v = eval('%s')\n f.extend(list(getattr(v, '_fields', {}).keys()) or [a for a in dir(v) if not a.startswith('_')])\nexcept: pass"); sys.stdout.write('\033]1337;SetUserVar=ODOO_AUTOCOMPLETE=' + base64.b64encode(json.dumps(f).encode()).decode() + '\007'); sys.stdout.flush()]],
+    var_name:gsub("'", "\\'")
+  )
+  M.send_silent_introspection(pane, py_cmd)
+end
+
+-- Action: Open Dynamic Autocomplete Dropdown (inspects current line for 'picking', 'self', etc.)
+function M.show_dynamic_autocomplete()
+  return wezterm.action_callback(function(window, pane)
+    local text = pane:get_lines_as_text(4) or ""
+    local last_line = text:match("([^\r\n]+)%s*$") or ""
+
+    -- Extract text after (Pdb) or >>> prompt
+    local input_part = last_line:match("%(Pdb%)%s*(.*)$")
+    if not input_part then
+      input_part = last_line:match(">>>%s*(.*)$") or last_line:match("In%s*%[%d+%]:%s*(.*)$") or last_line
+    end
+
+    -- Match prefix, variable/recordset name, and trailing dot
+    -- e.g. "picking." -> prefix="", var_name="picking", dot="."
+    -- e.g. "print(picking." -> prefix="print(", var_name="picking", dot="."
+    -- e.g. "self" -> prefix="", var_name="self", dot=""
+    local prefix, var_name, dot = input_part:match("^(.-)([%w_%.%[%]'\"]+)(%.?)$")
+
+    if not var_name or var_name == "" or var_name == "(Pdb)" then
+      -- If nothing typed on prompt, prompt user for object name (defaulting to self)
+      window:perform_action(
+        act.PromptInputLine {
+          description = "⚡ Autocomplete: Enter variable/recordset to inspect (e.g. self, picking, partner):",
+          initial_value = "self",
+          action = wezterm.action_callback(function(w, p, line)
+            if line and line:gsub("%s+", "") ~= "" then
+              M.query_and_show_autocomplete(w, p, "", line:gsub("%s+", ""), false)
+            end
+          end),
+        },
+        pane
+      )
+      return
+    end
+
+    M.query_and_show_autocomplete(window, pane, prefix or "", var_name, dot == ".")
+  end)
 end
 
 -- Action: Open Smart Macro Expansion Picker
@@ -268,6 +294,13 @@ function M.apply_to_config(config)
     action = M.reset_terminal_sane(),
   })
 
+  -- Keybinding: Ctrl+Space -> Dynamic Autocomplete (e.g. self. / picking.)
+  table.insert(config.keys, {
+    key = ' ',
+    mods = 'CTRL',
+    action = M.show_dynamic_autocomplete(),
+  })
+
   -- Keybindings for Breakpoint Features
   table.insert(config.keys, {
     key = 'r',
@@ -304,6 +337,52 @@ function M.apply_to_config(config)
     mods = 'LEADER',
     action = M.show_domain_picker(),
   })
+
+  -- Event: Receive dynamic fields from Python OSC 1337 and display autocomplete dropdown
+  wezterm.on('user-var-changed', function(window, pane, name, value)
+    if name == 'ODOO_AUTOCOMPLETE' then
+      local pending = M.pending_autocomplete
+      local prefix = pending and pending.prefix or ""
+      local var_name = pending and pending.var_name or "self"
+
+      local ok, fields = pcall(wezterm.json_parse, value)
+      if not ok or type(fields) ~= 'table' or #fields == 0 then
+        fields = { "id", "name", "display_name", "state", "origin", "partner_id", "create_date", "company_id", "env", "search", "browse", "filtered", "mapped" }
+      end
+
+      -- Sort fields with high-priority Odoo attributes at top
+      table.sort(fields, function(a, b)
+        local prio = { id = 1, name = 2, display_name = 3, state = 4, origin = 5, partner_id = 6 }
+        local pa = prio[a] or 100
+        local pb = prio[b] or 100
+        if pa ~= pb then return pa < pb end
+        return a < b
+      end)
+
+      local choices = {}
+      for _, f in ipairs(fields) do
+        table.insert(choices, {
+          id = f,
+          label = string.format(".%-24s (field/attr)", f),
+        })
+      end
+
+      window:perform_action(
+        act.InputSelector {
+          title = "⚡ Odoo Autocomplete: " .. var_name,
+          choices = choices,
+          fuzzy = true,
+          description = "Select field/attribute for '" .. var_name .. "' (Type to fuzzy filter, Enter=Insert, Esc=Cancel):",
+          action = wezterm.action_callback(function(w, p, id, label)
+            if id then
+              p:send_text(prefix .. var_name .. "." .. id)
+            end
+          end),
+        },
+        pane
+      )
+    end
+  end)
 
   -- Event: Update status bar with active PDB indicator
   wezterm.on('update-right-status', function(window, pane)
