@@ -6,19 +6,34 @@ local act = wezterm.action
 
 local M = {}
 
--- Base64 encoder helper for multi-line atomic snippet execution
-local b64table = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+-- Base64 encoder helper for multi-line atomic snippet execution and introspection
+local b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 local function base64_encode(data)
-  return ((data:gsub('.', function(x)
-    local r, b = '', x:byte()
-    for i = 8, 1, -1 do r = r .. (b % 2^i - b % 2^(i-1) > 0 and '1' or '0') end
-    return r
-  end) .. '0000'):gsub('%d%d%d?%d?%d?', function(x)
-    if #x < 6 then return '' end
-    local c = 0
-    for i = 1, 6 do c = c + (x:sub(i,i) == '1' and 2^(6-i) or 0) end
-    return b64table:sub(c+1, c+1)
-  end) .. ({ '', '==', '=' })[#data % 3 + 1])
+  local result = {}
+  local len = #data
+  local pad = 3 - (len % 3)
+  if pad == 3 then pad = 0 end
+  for i = 1, len, 3 do
+    local b1 = data:byte(i)
+    local b2 = data:byte(i + 1) or 0
+    local b3 = data:byte(i + 2) or 0
+    local n = b1 * 65536 + b2 * 256 + b3
+    local c1 = math.floor(n / 262144) % 64
+    local c2 = math.floor(n / 4096) % 64
+    local c3 = math.floor(n / 64) % 64
+    local c4 = n % 64
+    table.insert(result, b64chars:sub(c1 + 1, c1 + 1))
+    table.insert(result, b64chars:sub(c2 + 1, c2 + 1))
+    table.insert(result, b64chars:sub(c3 + 1, c3 + 1))
+    table.insert(result, b64chars:sub(c4 + 1, c4 + 1))
+  end
+  if pad == 1 then
+    result[#result] = '='
+  elseif pad == 2 then
+    result[#result] = '='
+    result[#result - 1] = '='
+  end
+  return table.concat(result)
 end
 
 -- Sentinel Markers & Introspection Query Definitions
@@ -29,24 +44,24 @@ M.SENTINELS = {
 
 -- Common Odoo Recordset Attributes & Fields for instant dropdown suggestions (e.g. self. / rec.)
 M.RECORDSET_ATTRS = {
-  { label = ".id (Record Primary Key)", id = ".id" },
-  { label = ".name (Record Name)", id = ".name" },
-  { label = ".display_name (Formatted Name)", id = ".display_name" },
-  { label = ".state (Document State)", id = ".state" },
-  { label = ".company_id (Active Company)", id = ".company_id" },
-  { label = ".create_date (Creation Timestamp)", id = ".create_date" },
-  { label = ".write_date (Modification Timestamp)", id = ".write_date" },
-  { label = ".create_uid (Creating User)", id = ".create_uid" },
-  { label = ".write_uid (Modifying User)", id = ".write_uid" },
-  { label = ".env (Odoo Environment)", id = ".env" },
-  { label = ".search([]) (ORM Search)", id = ".search([])" },
-  { label = ".search_count([]) (ORM Search Count)", id = ".search_count([])" },
-  { label = ".browse([]) (ORM Browse)", id = ".browse([])" },
-  { label = ".filtered(lambda r: r.) (Lambda Filter)", id = ".filtered(lambda r: r.)" },
-  { label = ".mapped('') (Field Mapper)", id = ".mapped('')" },
-  { label = ".fields_get() (Schema Inspection)", id = ".fields_get()" },
-  { label = ".read(['name']) (Dictionary Reader)", id = ".read(['name'])" },
-  { label = ".read(max_length=20) (Truncated Read)", id = "[{k: (v[:20]+(b'...' if isinstance(v, bytes) else '...') if isinstance(v, (str, bytes)) and len(v)>20 else v) for k, v in d.items()} for d in .read()]" },
+  { label = ".id                                🏷️  [FIELD]", id = ".id" },
+  { label = ".name                              🏷️  [FIELD]", id = ".name" },
+  { label = ".display_name                      🏷️  [FIELD]", id = ".display_name" },
+  { label = ".state                             🏷️  [FIELD]", id = ".state" },
+  { label = ".origin                            🏷️  [FIELD]", id = ".origin" },
+  { label = ".partner_id                        🏷️  [FIELD]", id = ".partner_id" },
+  { label = ".company_id                        🏷️  [FIELD]", id = ".company_id" },
+  { label = ".create_date                       🏷️  [FIELD]", id = ".create_date" },
+  { label = ".write_date                        🏷️  [FIELD]", id = ".write_date" },
+  { label = ".search([])                        ⚡ [METHOD]", id = ".search([])" },
+  { label = ".search_count([])                  ⚡ [METHOD]", id = ".search_count([])" },
+  { label = ".browse()                          ⚡ [METHOD]", id = ".browse()" },
+  { label = ".filtered(lambda r: r.)            ⚡ [METHOD]", id = ".filtered(lambda r: r.)" },
+  { label = ".mapped('')                        ⚡ [METHOD]", id = ".mapped('')" },
+  { label = ".fields_get()                      ⚡ [METHOD]", id = ".fields_get()" },
+  { label = ".read(['name'])                    ⚡ [METHOD]", id = ".read(['name'])" },
+  { label = ".read(max_length=20)               ⚡ [METHOD]", id = "[{k: (v[:20]+(b'...' if isinstance(v, bytes) else '...') if isinstance(v, (str, bytes)) and len(v)>20 else v) for k, v in d.items()} for d in .read()]" },
+  { label = ".env                               📦 [ATTR]", id = ".env" },
   { label = "🔍 Live Introspect Target in PDB...", id = "__introspect__" },
 }
 
@@ -80,26 +95,76 @@ function M.is_pdb_active(pane)
   return text:match("%(Pdb%)%s*$") ~= nil or text:match("%(ipdb%)%s*$") ~= nil or text:match("%n%(Pdb%)") ~= nil
 end
 
--- Action: Execute silent introspection query in PDB
+-- Action: Execute silent introspection query in PDB or Python Shell
 function M.send_silent_introspection(pane, py_code)
   if not pane then return end
-  local cmd = "\x15!" .. py_code .. "\n"
+  local text = pane:get_lines_as_text(5) or ""
+  local last_line = text:match("([^\r\n]+)%s*$") or ""
+  local is_pdb = last_line:match("%(Pdb%)") ~= nil or last_line:match("%(ipdb%)") ~= nil
+  if not is_pdb and (text:match("%(Pdb%)%s*$") ~= nil or text:match("%(ipdb%)%s*$") ~= nil) then
+    is_pdb = true
+  end
+  -- In PDB, statements must be prefixed with '!', in standard Python shell (>>>) no '!' prefix
+  local prefix = is_pdb and "\x15!" or "\x15"
+  local cmd = prefix .. py_code .. "\n"
   pane:send_text(cmd)
 end
 
 M.pending_autocomplete = nil
 
--- Action: Query Python in background and emit OSC 1337 user var with dynamic fields
+-- Action: Query Python in background and emit OSC 1337 user var with dynamic fields, methods, and attributes
 function M.query_and_show_autocomplete(window, pane, prefix, var_name, had_dot)
+  -- Strip trailing dots and spaces to avoid syntax error in eval: e.g. "self.env['res.users']." -> "self.env['res.users']"
+  local clean_var = var_name:gsub("%.+$", ""):gsub("%s+$", "")
+  if clean_var == "" then clean_var = "self" end
+
   M.pending_autocomplete = {
     prefix = prefix or "",
-    var_name = var_name,
+    var_name = clean_var,
     had_dot = had_dot,
   }
 
+  -- Use Base64 encoding of clean_var to prevent any quote or syntax escaping issues
+  local var_b64 = base64_encode(clean_var)
+  local py_template = string.format([=[
+import sys, json, base64
+__res = {"f": [], "m": [], "a": []}
+try:
+    __expr = base64.b64decode("%s").decode("utf-8")
+    __v = eval(__expr)
+    
+    __fset = set()
+    if hasattr(__v, "_fields") and isinstance(__v._fields, dict):
+        __fset.update(__v._fields.keys())
+    elif hasattr(__v, "fields_get") and callable(__v.fields_get):
+        try:
+            __fset.update(__v.fields_get().keys())
+        except Exception:
+            pass
+            
+    __res["f"] = sorted(__fset)
+    
+    for __attr in sorted(dir(__v)):
+        if not __attr.startswith("_") and __attr not in __fset:
+            try:
+                __val = getattr(__v, __attr, None)
+                if callable(__val):
+                    __res["m"].append(__attr)
+                else:
+                    __res["a"].append(__attr)
+            except Exception:
+                __res["a"].append(__attr)
+except Exception:
+    pass
+
+sys.stdout.write("\033]1337;SetUserVar=ODOO_AUTOCOMPLETE=" + base64.b64encode(json.dumps(__res).encode()).decode() + "\007")
+sys.stdout.flush()
+]=], var_b64)
+
+  local inner_b64 = base64_encode(py_template)
   local py_cmd = string.format(
-    [[!import json, base64, sys; f = []; exec("try:\n v = eval('%s')\n f.extend(list(getattr(v, '_fields', {}).keys()) or [a for a in dir(v) if not a.startswith('_')])\nexcept: pass"); sys.stdout.write('\033]1337;SetUserVar=ODOO_AUTOCOMPLETE=' + base64.b64encode(json.dumps(f).encode()).decode() + '\007'); sys.stdout.flush()]],
-    var_name:gsub("'", "\\'")
+    'import base64; exec(base64.b64decode("%s").decode("utf-8"), globals(), locals())',
+    inner_b64
   )
   M.send_silent_introspection(pane, py_cmd)
 end
@@ -115,6 +180,7 @@ function M.show_dynamic_autocomplete()
     if not input_part then
       input_part = last_line:match(">>>%s*(.*)$") or last_line:match("In%s*%[%d+%]:%s*(.*)$") or last_line
     end
+    input_part = input_part:gsub("%s+$", "")
 
     -- Match prefix, variable/recordset name, and trailing dot
     -- e.g. "picking." -> prefix="", var_name="picking", dot="."
@@ -345,25 +411,131 @@ function M.apply_to_config(config)
       local prefix = pending and pending.prefix or ""
       local var_name = pending and pending.var_name or "self"
 
-      local ok, fields = pcall(wezterm.json_parse, value)
-      if not ok or type(fields) ~= 'table' or #fields == 0 then
-        fields = { "id", "name", "display_name", "state", "origin", "partner_id", "create_date", "company_id", "env", "search", "browse", "filtered", "mapped" }
+      local ok, res = pcall(wezterm.json_parse, value)
+      local fields = {}
+      local methods = {}
+      local attrs = {}
+
+      if ok and type(res) == 'table' then
+        if type(res.f) == 'table' then fields = res.f end
+        if type(res.m) == 'table' then methods = res.m end
+        if type(res.a) == 'table' then attrs = res.a end
+
+        -- Backwards compatibility if res was a flat array or list of objects
+        if #fields == 0 and #methods == 0 and #attrs == 0 and #res > 0 then
+          for _, item in ipairs(res) do
+            if type(item) == 'table' and item.name then
+              if item.type == 'method' then
+                table.insert(methods, item.name)
+              elseif item.type == 'attr' then
+                table.insert(attrs, item.name)
+              else
+                table.insert(fields, item.name)
+              end
+            elseif type(item) == 'string' then
+              table.insert(fields, item)
+            end
+          end
+        end
       end
 
-      -- Sort fields with high-priority Odoo attributes at top
+      -- If dynamic introspection returned empty (e.g. invalid target or offline fallback)
+      if #fields == 0 and #methods == 0 and #attrs == 0 then
+        fields = { "id", "name", "display_name", "state", "origin", "partner_id", "company_id", "create_date", "write_date", "l10n_gstr" }
+        methods = { "search", "search_count", "browse", "filtered", "mapped", "read", "fields_get", "action_confirm", "write", "create", "unlink" }
+        attrs = { "env", "ids", "_name", "_description" }
+      end
+
+      -- Sort fields with high-priority Odoo fields at top
+      local field_prio = {
+        id = 1,
+        name = 2,
+        display_name = 3,
+        state = 4,
+        origin = 5,
+        partner_id = 6,
+        company_id = 7,
+        create_date = 8,
+        write_date = 9,
+      }
       table.sort(fields, function(a, b)
-        local prio = { id = 1, name = 2, display_name = 3, state = 4, origin = 5, partner_id = 6 }
-        local pa = prio[a] or 100
-        local pb = prio[b] or 100
+        local pa = field_prio[a] or 100
+        local pb = field_prio[b] or 100
+        if pa ~= pb then return pa < pb end
+        return a < b
+      end)
+
+      -- Sort common Odoo ORM methods at top
+      local method_prio = {
+        search = 1,
+        search_count = 2,
+        browse = 3,
+        filtered = 4,
+        mapped = 5,
+        read = 6,
+        fields_get = 7,
+        write = 8,
+        create = 9,
+        unlink = 10,
+      }
+      table.sort(methods, function(a, b)
+        local pa = method_prio[a] or 100
+        local pb = method_prio[b] or 100
+        if pa ~= pb then return pa < pb end
+        return a < b
+      end)
+
+      -- Sort common attributes at top
+      local attr_prio = {
+        env = 1,
+        ids = 2,
+        _name = 3,
+        _description = 4,
+        cr = 5,
+        context = 6,
+      }
+      table.sort(attrs, function(a, b)
+        local pa = attr_prio[a] or 100
+        local pb = attr_prio[b] or 100
         if pa ~= pb then return pa < pb end
         return a < b
       end)
 
       local choices = {}
+
+      -- 1. FIELDS SECTION (e.g. .l10n_gstr, .name, .partner_id)
       for _, f in ipairs(fields) do
         table.insert(choices, {
           id = f,
-          label = string.format(".%-24s (field/attr)", f),
+          label = string.format(".%-32s 🏷️  [FIELD]", f),
+        })
+      end
+
+      -- 2. METHODS SECTION (e.g. .search([]), .action_confirm(), .browse())
+      for _, m in ipairs(methods) do
+        local call_repr = m .. "()"
+        local insert_id = m .. "()"
+        if m == "search" or m == "search_count" then
+          call_repr = m .. "([])"
+          insert_id = m .. "([])"
+        elseif m == "filtered" then
+          call_repr = m .. "(lambda r: ...)"
+          insert_id = m .. "(lambda r: r.)"
+        elseif m == "mapped" then
+          call_repr = m .. "('...')"
+          insert_id = m .. "('')"
+        end
+        table.insert(choices, {
+          id = insert_id,
+          label = string.format(".%-32s ⚡ [METHOD]", call_repr),
+        })
+      end
+
+      -- 3. ATTRIBUTES SECTION (e.g. .env, .ids)
+      for _, a in ipairs(attrs) do
+        table.insert(choices, {
+          id = a,
+          label = string.format(".%-32s 📦 [ATTR]", a),
         })
       end
 
@@ -372,7 +544,7 @@ function M.apply_to_config(config)
           title = "⚡ Odoo Autocomplete: " .. var_name,
           choices = choices,
           fuzzy = true,
-          description = "Select field/attribute for '" .. var_name .. "' (Type to fuzzy filter, Enter=Insert, Esc=Cancel):",
+          description = "Select field, method or attribute for '" .. var_name .. "' (Type to fuzzy filter, Enter=Insert, Esc=Cancel):",
           action = wezterm.action_callback(function(w, p, id, label)
             if id then
               p:send_text(prefix .. var_name .. "." .. id)
