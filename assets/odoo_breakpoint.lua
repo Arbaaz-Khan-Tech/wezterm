@@ -299,11 +299,11 @@ function M.show_snippet_executor()
     action = wezterm.action_callback(function(window, pane, raw_code)
       if raw_code and raw_code:gsub("%s+", "") ~= "" then
         local b64 = base64_encode(raw_code)
-        local cmd = string.format(
-          '\x15!import base64; exec(compile(base64.b64decode("%s").decode("utf-8"), "<snippet>", "single"))\n',
+        local py_code = string.format(
+          'import base64, textwrap; exec(textwrap.dedent(base64.b64decode("%s").decode("utf-8")), globals(), locals())',
           b64
         )
-        pane:send_text(cmd)
+        M.send_silent_introspection(pane, py_code)
       end
     end),
   }
